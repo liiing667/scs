@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/alexedwards/scs/v2/mockstore"
 )
 
 type testServer struct {
@@ -417,5 +419,279 @@ func TestMultipleWrites(t *testing.T) {
 	_, body = ts.execute(t, "/get")
 	if body != "" {
 		t.Errorf("want %q; got %q", "", body)
+	}
+}
+
+func TestValidToken(t *testing.T) {
+	t.Parallel()
+
+	validTokens := []string{
+		"abc",
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+		"my-custom-token",
+		"token.with.dots",
+		"v1:abc/DEF+123=",
+	}
+	for _, token := range validTokens {
+		if !validToken(token) {
+			t.Errorf("validToken(%q): want true; got false", token)
+		}
+	}
+
+	invalidTokens := []string{
+		"",
+		"bad token",
+		`"quoted"`,
+		"semi;colon",
+		"ctl\x01value",
+		"tab\tvalue",
+	}
+	for _, token := range invalidTokens {
+		if validToken(token) {
+			t.Errorf("validToken(%q): want false; got true", token)
+		}
+	}
+}
+
+func TestExtractSessionToken(t *testing.T) {
+	t.Parallel()
+
+	sessionManager := New()
+
+	tests := []struct {
+		name      string
+		cookies   []string
+		wantToken string
+		wantErr   error
+	}{
+		{name: "no session cookie", cookies: []string{"other=1"}, wantToken: "", wantErr: nil},
+		{name: "no cookies at all", cookies: nil, wantToken: "", wantErr: nil},
+		{name: "single session cookie", cookies: []string{"session=abc"}, wantToken: "abc", wantErr: nil},
+		{name: "duplicate distinct session cookies in one header", cookies: []string{"session=abc; session=def"}, wantToken: "", wantErr: ErrMultipleSessionCookies},
+		{name: "duplicate identical session cookies in one header", cookies: []string{"session=abc; session=abc"}, wantToken: "", wantErr: ErrMultipleSessionCookies},
+		{name: "duplicate session cookies across headers", cookies: []string{"session=abc", "session=def"}, wantToken: "", wantErr: ErrMultipleSessionCookies},
+		{name: "empty session cookie value", cookies: []string{"session="}, wantToken: "", wantErr: ErrInvalidSessionToken},
+		{name: "whitespace in token", cookies: []string{"session=bad value"}, wantToken: "", wantErr: ErrInvalidSessionToken},
+		{name: "trailing whitespace in token", cookies: []string{"session=abc "}, wantToken: "", wantErr: ErrInvalidSessionToken},
+		{name: "quoted token", cookies: []string{`session="quoted"`}, wantToken: "", wantErr: ErrInvalidSessionToken},
+		{name: "control character in token", cookies: []string{"session=ctl\x01value"}, wantToken: "", wantErr: ErrInvalidSessionToken},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/", nil)
+			for _, cookie := range tt.cookies {
+				req.Header.Add("Cookie", cookie)
+			}
+
+			token, err := sessionManager.extractSessionToken(req)
+			if token != tt.wantToken {
+				t.Errorf("want token %q; got %q", tt.wantToken, token)
+			}
+			if err != tt.wantErr {
+				t.Errorf("want err %v; got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestLoadAndSaveRejectsDuplicateSessionCookies(t *testing.T) {
+	t.Parallel()
+
+	sessionManager := New()
+
+	var handlerCalled bool
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		sessionManager.Put(r.Context(), "foo", "bar")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Cookie", "session=abc; session=def")
+
+	sessionManager.LoadAndSave(handler).ServeHTTP(rr, req)
+
+	if handlerCalled {
+		t.Error("next handler should not be called for a request with duplicate session cookies")
+	}
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("want status %d; got %d", http.StatusInternalServerError, rr.Code)
+	}
+	if setCookie := rr.Header().Values("Set-Cookie"); len(setCookie) != 0 {
+		t.Errorf("want no Set-Cookie headers on the error path; got %v", setCookie)
+	}
+}
+
+func TestLoadAndSaveRejectsDuplicateSessionCookieHeaders(t *testing.T) {
+	t.Parallel()
+
+	sessionManager := New()
+
+	var handlerCalled bool
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	// Two separate Cookie headers, as might be forwarded by a proxy.
+	req.Header.Add("Cookie", "session=abc")
+	req.Header.Add("Cookie", "session=def")
+
+	sessionManager.LoadAndSave(handler).ServeHTTP(rr, req)
+
+	if handlerCalled {
+		t.Error("next handler should not be called when session cookies arrive in separate headers")
+	}
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("want status %d; got %d", http.StatusInternalServerError, rr.Code)
+	}
+	if setCookie := rr.Header().Values("Set-Cookie"); len(setCookie) != 0 {
+		t.Errorf("want no Set-Cookie headers on the error path; got %v", setCookie)
+	}
+}
+
+func TestLoadAndSaveRejectsMalformedSessionToken(t *testing.T) {
+	t.Parallel()
+
+	sessionManager := New()
+
+	var handlerCalled bool
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		sessionManager.Put(r.Context(), "foo", "bar")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	cases := map[string]string{
+		"empty value":         "session=",
+		"whitespace in value": "session=bad value",
+		"control in value":    "session=ctl\x01value",
+		"quoted value":        `session="quoted"`,
+	}
+
+	for name, cookie := range cases {
+		t.Run(name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", "/", nil)
+			req.Header.Set("Cookie", cookie)
+
+			sessionManager.LoadAndSave(handler).ServeHTTP(rr, req)
+
+			if handlerCalled {
+				t.Error("next handler should not be called for a request with an invalid session token")
+			}
+			if rr.Code != http.StatusInternalServerError {
+				t.Errorf("want status %d; got %d", http.StatusInternalServerError, rr.Code)
+			}
+			if setCookie := rr.Header().Values("Set-Cookie"); len(setCookie) != 0 {
+				t.Errorf("want no Set-Cookie headers on the error path; got %v", setCookie)
+			}
+		})
+	}
+}
+
+func TestLoadAndSaveInvalidTokenUsesErrorFunc(t *testing.T) {
+	t.Parallel()
+
+	sessionManager := New()
+
+	var gotErr error
+	sessionManager.ErrorFunc = func(w http.ResponseWriter, r *http.Request, err error) {
+		gotErr = err
+		w.WriteHeader(http.StatusBadRequest)
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Cookie", "session=abc; session=def")
+
+	sessionManager.LoadAndSave(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("next handler should not be called")
+	})).ServeHTTP(rr, req)
+
+	if gotErr != ErrMultipleSessionCookies {
+		t.Fatalf("want ErrMultipleSessionCookies; got %v", gotErr)
+	}
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("want custom ErrorFunc status %d; got %d", http.StatusBadRequest, rr.Code)
+	}
+	if setCookie := rr.Header().Values("Set-Cookie"); len(setCookie) != 0 {
+		t.Errorf("want no Set-Cookie headers on the error path; got %v", setCookie)
+	}
+}
+
+func TestLoadAndSaveInvalidRequestsDoNotTouchStore(t *testing.T) {
+	t.Parallel()
+
+	sessionManager := New()
+	// The mock store panics if any of its methods are called without a
+	// matching expectation, proving that a failed request never reaches the
+	// store and cannot create or overwrite a session.
+	sessionManager.Store = &mockstore.MockStore{}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("next handler should not be called")
+	})
+
+	cases := map[string][]string{
+		"duplicate session cookies": {"session=abc; session=def"},
+		"empty token":               {"session="},
+		"malformed token":           {"session=bad value"},
+	}
+
+	for name, cookies := range cases {
+		t.Run(name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", "/", nil)
+			for _, cookie := range cookies {
+				req.Header.Add("Cookie", cookie)
+			}
+
+			sessionManager.LoadAndSave(handler).ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusInternalServerError {
+				t.Errorf("want status %d; got %d", http.StatusInternalServerError, rr.Code)
+			}
+			if setCookie := rr.Header().Values("Set-Cookie"); len(setCookie) != 0 {
+				t.Errorf("want no Set-Cookie headers on the error path; got %v", setCookie)
+			}
+		})
+	}
+}
+
+func TestLoadAndSaveAcceptsCustomStoreTokens(t *testing.T) {
+	t.Parallel()
+
+	sessionManager := New()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/put", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessionManager.SetToken(r.Context(), "my-custom-token")
+		sessionManager.Put(r.Context(), "foo", "bar")
+	}))
+	mux.HandleFunc("/get", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v := sessionManager.Get(r.Context(), "foo")
+		if v == nil {
+			http.Error(w, "foo does not exist in session", 500)
+			return
+		}
+		w.Write([]byte(v.(string)))
+	}))
+
+	ts := newTestServer(t, sessionManager.LoadAndSave(mux))
+	defer ts.Close()
+
+	header, _ := ts.execute(t, "/put")
+	if token := extractTokenFromCookie(header.Get("Set-Cookie")); token != "my-custom-token" {
+		t.Fatalf("want token %q; got %q", "my-custom-token", token)
+	}
+
+	_, body := ts.execute(t, "/get")
+	if body != "bar" {
+		t.Errorf("want %q; got %q", "bar", body)
 	}
 }
