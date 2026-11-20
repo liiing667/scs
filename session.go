@@ -90,7 +90,7 @@ type SessionCookie struct {
 	// See https://github.com/OWASP/CheatSheetSeries/blob/master/cheatsheets/Session_Management_Cheat_Sheet.md#transport-layer-security.
 	Secure bool
 
-	// Secure sets the 'Partitioned' attribute on the session cookie. The
+	// Partitioned sets the 'Partitioned' attribute on the session cookie. The
 	// default value is false.
 	Partitioned bool
 
@@ -140,6 +140,11 @@ func NewSession() *SessionManager {
 // the client in a cookie.
 func (s *SessionManager) LoadAndSave(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := s.validateCookiePolicy(); err != nil {
+			s.ErrorFunc(w, r, err)
+			return
+		}
+
 		w.Header().Add("Vary", "Cookie")
 
 		var token string
@@ -188,9 +193,13 @@ func (s *SessionManager) commitAndAddSessionCookie(w http.ResponseWriter, r *htt
 			return err
 		}
 
-		s.AddSessionCookie(ctx, w, token, expiry)
+		if err := s.addSessionCookie(ctx, w, token, expiry); err != nil {
+			return err
+		}
 	case Destroyed:
-		s.AddSessionCookie(ctx, w, "", time.Time{})
+		if err := s.addSessionCookie(ctx, w, "", time.Time{}); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -213,6 +222,16 @@ func (s *SessionManager) WriteSessionCookie(ctx context.Context, w http.Response
 // Most applications will use the LoadAndSave() middleware and will not need to
 // use this method.
 func (s *SessionManager) AddSessionCookie(ctx context.Context, w http.ResponseWriter, token string, expiry time.Time) {
+	if err := s.addSessionCookie(ctx, w, token, expiry); err != nil {
+		log.Output(2, err.Error())
+	}
+}
+
+func (s *SessionManager) addSessionCookie(ctx context.Context, w http.ResponseWriter, token string, expiry time.Time) error {
+	if err := s.validateCookiePolicy(); err != nil {
+		return err
+	}
+
 	cookie := &http.Cookie{
 		Value:       token,
 		Name:        s.Cookie.Name,
@@ -234,6 +253,8 @@ func (s *SessionManager) AddSessionCookie(ctx context.Context, w http.ResponseWr
 
 	w.Header().Add("Set-Cookie", cookie.String())
 	w.Header().Add("Cache-Control", "no-store")
+
+	return nil
 }
 
 func defaultErrorFunc(w http.ResponseWriter, r *http.Request, err error) {

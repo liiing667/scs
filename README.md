@@ -128,6 +128,18 @@ sessionManager.Cookie.Partitioned = true
 
 Documentation for all available settings and their default values can be [found here](https://pkg.go.dev/github.com/alexedwards/scs/v2#SessionManager).
 
+### Cookie Policy Validation
+
+SCS validates the cookie policy before any cookie is issued, so a configuration that a browser would reject (or refuse to send back) fails fast via the `ErrorFunc` instead of silently breaking sessions. The following rules are enforced:
+
+- The cookie name must be a non-empty [RFC 6265](https://www.rfc-editor.org/rfc/rfc6265#section-4.1.1) token: no whitespace, commas, colons, semicolons, backslashes, equals signs or control characters.
+- `SameSite=None` requires `Secure` (browsers reject non-secure `SameSite=None` cookies).
+- `Partitioned` requires `Secure`.
+- The `__Host-` name prefix requires `Secure`, `Path="/"` and an empty `Domain`.
+- The `__Secure-` name prefix requires `Secure`.
+
+The wrapped handler is not called when the policy is invalid, no `Set-Cookie` header is emitted, and the request receives the error response (HTTP 500 by default). All other attribute combinations — including the default `SameSite=Lax` policy and legacy configurations without a `SameSite` attribute — continue to work unchanged.
+
 ### Working with Session Data
 
 Data can be set using the [`Put()`](https://pkg.go.dev/github.com/alexedwards/scs/v2#SessionManager.Put) method and retrieved with the [`Get()`](https://pkg.go.dev/github.com/alexedwards/scs/v2#SessionManager.Get) method. A variety of helper methods like [`GetString()`](https://pkg.go.dev/github.com/alexedwards/scs/v2#SessionManager.GetString), [`GetInt()`](https://pkg.go.dev/github.com/alexedwards/scs/v2#SessionManager.GetInt) and [`GetBytes()`](https://pkg.go.dev/github.com/alexedwards/scs/v2#SessionManager.GetBytes) are included for common data types. Please see [the documentation](https://pkg.go.dev/github.com/alexedwards/scs/v2#pkg-index) for a full list of helper methods.
