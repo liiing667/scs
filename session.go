@@ -12,6 +12,10 @@ import (
 
 var ErrUncommittedModification = errors.New("the session data contains uncommitted modifications, probably because you are modifying the session data after the response headers have already been written; if you need to modify the session data after the response headers are written, please call the Commit method after making the modification to persist the changes")
 
+// ErrMaxBytesExceeded is returned by Commit when the encoded session data
+// exceeds the SessionManager.MaxBytes limit.
+var ErrMaxBytesExceeded = errors.New("the encoded session data exceeds the MaxBytes limit")
+
 // Deprecated: Session is a backwards-compatible alias for SessionManager.
 type Session = SessionManager
 
@@ -39,6 +43,13 @@ type SessionManager struct {
 	// byte slice for use by the session store. By default session data is
 	// encoded/decoded using encoding/gob.
 	Codec Codec
+
+	// MaxBytes controls the maximum size, in bytes, of the encoded session
+	// data that may be committed to the session store. If the encoded session
+	// data exceeds this limit then Commit will fail with ErrMaxBytesExceeded
+	// and neither the session store nor the session token will be changed.
+	// The default value of 0 means that no limit is enforced.
+	MaxBytes int
 
 	// ErrorFunc allows you to control behavior when an error is encountered by
 	// the LoadAndSave middleware. The default behavior is for a HTTP 500

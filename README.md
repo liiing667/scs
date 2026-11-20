@@ -128,6 +128,12 @@ sessionManager.Cookie.Partitioned = true
 
 Documentation for all available settings and their default values can be [found here](https://pkg.go.dev/github.com/alexedwards/scs/v2#SessionManager).
 
+To protect the session store from oversized payloads, you can set the `MaxBytes` field to limit the size of the encoded session data. If a commit would exceed the limit, `Commit()` fails with `ErrMaxBytesExceeded` and neither the session store nor the session token is changed. The default value of `0` means no limit is enforced.
+
+```go
+sessionManager.MaxBytes = 16384
+```
+
 ### Working with Session Data
 
 Data can be set using the [`Put()`](https://pkg.go.dev/github.com/alexedwards/scs/v2#SessionManager.Put) method and retrieved with the [`Get()`](https://pkg.go.dev/github.com/alexedwards/scs/v2#SessionManager.Get) method. A variety of helper methods like [`GetString()`](https://pkg.go.dev/github.com/alexedwards/scs/v2#SessionManager.GetString), [`GetInt()`](https://pkg.go.dev/github.com/alexedwards/scs/v2#SessionManager.GetInt) and [`GetBytes()`](https://pkg.go.dev/github.com/alexedwards/scs/v2#SessionManager.GetBytes) are included for common data types. Please see [the documentation](https://pkg.go.dev/github.com/alexedwards/scs/v2#pkg-index) for a full list of helper methods.

@@ -401,6 +401,133 @@ func TestSessionManager_Commit(T *testing.T) {
 	})
 }
 
+func TestSessionManager_CommitMaxBytes(T *testing.T) {
+	T.Parallel()
+
+	deadline := time.Now().Add(time.Hour).UTC()
+
+	s := New()
+
+	encode := func(values map[string]interface{}) []byte {
+		T.Helper()
+		b, err := s.Codec.Encode(deadline, values)
+		if err != nil {
+			T.Fatalf("unexpected encode error: %v", err)
+		}
+		return b
+	}
+
+	normalValues := map[string]interface{}{"name": "alice"}
+
+	// Fix the limit relative to a normal-sized session, with enough headroom
+	// for the padding key used to construct exact-size payloads below. The
+	// headroom keeps the padding length clear of gob's length-prefix
+	// boundaries so that any exact size in the range is attainable.
+	limit := len(encode(normalValues)) + 1024
+	s.MaxBytes = limit
+
+	// exactValues returns session values whose encoded size is exactly size
+	// bytes, by adjusting the length of a padding value.
+	exactValues := func(size int) map[string]interface{} {
+		T.Helper()
+		padLen := size - len(encode(map[string]interface{}{"pad": []byte{}}))
+		for i := 0; ; i++ {
+			if i == 10 {
+				T.Fatalf("could not construct values with encoded size %d", size)
+			}
+			values := map[string]interface{}{"pad": make([]byte, padLen)}
+			diff := size - len(encode(values))
+			if diff == 0 {
+				return values
+			}
+			padLen += diff
+		}
+	}
+
+	T.Run("normal commit below limit", func(t *testing.T) {
+		ctx, err := s.Load(context.Background(), "")
+		if err != nil {
+			t.Fatalf("unexpected load error: %v", err)
+		}
+
+		s.Put(ctx, "name", "alice")
+
+		token, _, err := s.Commit(ctx)
+		if err != nil {
+			t.Fatalf("unexpected commit error: %v", err)
+		}
+		if token == "" {
+			t.Error("expected non-empty token")
+		}
+		if _, found, err := s.Store.Find(token); err != nil || !found {
+			t.Errorf("expected session data in store, got found=%v, err=%v", found, err)
+		}
+		if s.Status(ctx) != Committed {
+			t.Errorf("expected status %v, got %v", Committed, s.Status(ctx))
+		}
+	})
+
+	T.Run("boundary commit at limit", func(t *testing.T) {
+		ctx, err := s.Load(context.Background(), "")
+		if err != nil {
+			t.Fatalf("unexpected load error: %v", err)
+		}
+
+		for key, val := range exactValues(limit) {
+			s.Put(ctx, key, val)
+		}
+
+		token, _, err := s.Commit(ctx)
+		if err != nil {
+			t.Fatalf("unexpected commit error: %v", err)
+		}
+		if token == "" {
+			t.Error("expected non-empty token")
+		}
+		if _, found, err := s.Store.Find(token); err != nil || !found {
+			t.Errorf("expected session data in store, got found=%v, err=%v", found, err)
+		}
+	})
+
+	T.Run("rejection above limit preserves identity", func(t *testing.T) {
+		original := encode(normalValues)
+		if err := s.Store.Commit("token123", original, deadline); err != nil {
+			t.Fatalf("unexpected store error: %v", err)
+		}
+
+		ctx, err := s.Load(context.Background(), "token123")
+		if err != nil {
+			t.Fatalf("unexpected load error: %v", err)
+		}
+
+		for key, val := range exactValues(limit + 1) {
+			s.Put(ctx, key, val)
+		}
+
+		token, _, err := s.Commit(ctx)
+		if !errors.Is(err, ErrMaxBytesExceeded) {
+			t.Fatalf("expected ErrMaxBytesExceeded, got %v", err)
+		}
+		if token != "" {
+			t.Errorf("expected empty token, got %q", token)
+		}
+		if s.Token(ctx) != "token123" {
+			t.Errorf("expected session token to remain %q, got %q", "token123", s.Token(ctx))
+		}
+		if s.Status(ctx) != Modified {
+			t.Errorf("expected status %v, got %v", Modified, s.Status(ctx))
+		}
+
+		b, found, err := s.Store.Find("token123")
+		if err != nil || !found {
+			t.Fatalf("expected persisted session data, got found=%v, err=%v", found, err)
+		}
+		if !bytes.Equal(b, original) {
+			t.Error("expected persisted session data to be unchanged")
+		}
+	})
+}
+
 func TestPut(t *testing.T) {
 	t.Parallel()
 

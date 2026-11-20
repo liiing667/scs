@@ -135,16 +135,20 @@ func (s *SessionManager) Commit(ctx context.Context) (string, time.Time, error) 
 	sd.mu.Lock()
 	defer sd.mu.Unlock()
 
+	b, err := s.Codec.Encode(sd.deadline, sd.values)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+
+	if s.MaxBytes > 0 && len(b) > s.MaxBytes {
+		return "", time.Time{}, ErrMaxBytesExceeded
+	}
+
 	if sd.token == "" {
 		var err error
 		if sd.token, err = generateToken(); err != nil {
 			return "", time.Time{}, err
 		}
-	}
-
-	b, err := s.Codec.Encode(sd.deadline, sd.values)
-	if err != nil {
-		return "", time.Time{}, err
 	}
 
 	if err := s.doStoreCommit(ctx, sd.token, b, sd.expiry); err != nil {
